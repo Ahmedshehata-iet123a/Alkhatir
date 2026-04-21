@@ -3,7 +3,7 @@
 #
 #    Cybrosys Technologies Pvt. Ltd.
 #
-#    Copyright (C) 2024-TODAY Cybrosys Technologies(<https://www.cybrosys.com>)
+#    Copyright (C) 2025-TODAY Cybrosys Technologies(<https://www.cybrosys.com>)
 #    Author: Cybrosys Techno Solutions (odoo@cybrosys.com)
 #
 #    You can modify it under the terms of the GNU LESSER
@@ -19,29 +19,24 @@
 #    If not, see <http://www.gnu.org/licenses/>.
 #
 ###############################################################################
+from email.policy import default
+
 import boto3
 import dropbox
 import errno
 import ftplib
 import json
 import logging
-try:
-    import nextcloud_client
-except ImportError:
-    nextcloud_client = None
+import nextcloud_client
 import os
 import paramiko
 import requests
 import shutil
 import subprocess
 import tempfile
-import threading
 import odoo
-from datetime import timedelta
-try:
-    from nextcloud import NextCloud
-except ImportError:
-    NextCloud = None
+from datetime import datetime, timedelta
+from nextcloud import NextCloud
 from requests.auth import HTTPBasicAuth
 from werkzeug import urls
 from odoo import api, fields, models, _
@@ -129,6 +124,7 @@ class DbBackupConfigure(models.Model):
     auto_remove = fields.Boolean(string='Remove Old Backups',
                                  help='Remove old backups')
     days_to_remove = fields.Integer(string='Remove After',
+                                    default=1,
                                     help='Automatically delete stored backups'
                                          ' after this specified number of days')
     google_drive_folder_key = fields.Char(string='Drive Folder ID',
@@ -136,13 +132,13 @@ class DbBackupConfigure(models.Model):
     notify_user = fields.Boolean(string='Notify User',
                                  help='Send an email notification to user when'
                                       'the backup operation is successful'
-                                      'or failed')
+                                      ' or failed')
     user_id = fields.Many2one('res.users', string='User',
                               help='Name of the user')
     backup_filename = fields.Char(string='Backup Filename',
                                   help='For Storing generated backup filename')
     generated_exception = fields.Char(string='Exception',
-                                      help='Exception Encountered while Backup'
+                                      help='Exception Encountered while Backup '
                                            'generation')
     onedrive_client_key = fields.Char(string='Onedrive Client ID', copy=False,
                                       help='Client ID of the onedrive')
@@ -352,7 +348,7 @@ class DbBackupConfigure(models.Model):
         url_return = f"{base_url}/web#id={self.id}&action={action_id}&view_type=form&model=db.backup.configure"
         state = {
             'backup_config_id': self.id,
-            'url_return': url_return }
+            'url_return': url_return}
         params = {
             'response_type': 'code',
             'client_id': self.onedrive_client_key,
@@ -585,47 +581,17 @@ class DbBackupConfigure(models.Model):
         if self.backup_destination == 'local':
             self.hide_active = True
 
-    def action_backup_now(self):
-        """Manually trigger a backup for this record in a background thread."""
-        self.ensure_one()
-        record_id = self.id
-        db_name = self.env.cr.dbname
-        frequency = self.backup_frequency
-
-        def run_backup():
-            with odoo.registry(db_name).cursor() as cr:
-                env = odoo.api.Environment(cr, odoo.SUPERUSER_ID, {})
-                record = env['db.backup.configure'].browse(record_id)
-                record._schedule_auto_backup(frequency, manual_record=record)
-
-        thread = threading.Thread(target=run_backup, daemon=True)
-        thread.start()
-
-        return {
-            'type': 'ir.actions.client',
-            'tag': 'display_notification',
-            'params': {
-                'type': 'success',
-                'title': _("Backup Started"),
-                'message': _("Backup is running in the background. You will be notified when done."),
-                'sticky': False,
-            }
-        }
-
-    def _schedule_auto_backup(self, frequency, manual_record=None):
+    def _schedule_auto_backup(self, frequency):
         """Function for generating and storing backup.
            Database backup for all the active records in backup configuration
            model will be created."""
-        if manual_record:
-            records = manual_record
-        else:
-            records = self.search([('backup_frequency', '=', frequency)])
+        records = self.search([('backup_frequency', '=', frequency)])
         mail_template_success = self.env.ref(
             'auto_database_backup.mail_template_data_db_backup_successful')
         mail_template_failed = self.env.ref(
             'auto_database_backup.mail_template_data_db_backup_failed')
         for rec in records:
-            backup_time = fields.datetime.utcnow().strftime("%Y-%m-%d_%H-%M-%S")
+            backup_time = datetime.utcnow().strftime("%Y-%m-%d_%H-%M-%S")
             backup_filename = f"{rec.db_name}_{backup_time}.{rec.backup_format}"
             rec.backup_filename = backup_filename
             # Local backup
@@ -642,9 +608,9 @@ class DbBackupConfigure(models.Model):
                     if rec.auto_remove:
                         for filename in os.listdir(rec.backup_path):
                             file = os.path.join(rec.backup_path, filename)
-                            create_time = fields.datetime.fromtimestamp(
+                            create_time = datetime.fromtimestamp(
                                 os.path.getctime(file))
-                            backup_duration = fields.datetime.utcnow() - create_time
+                            backup_duration = datetime.utcnow() - create_time
                             if backup_duration.days >= rec.days_to_remove:
                                 os.remove(file)
                     if rec.notify_user:
@@ -676,11 +642,11 @@ class DbBackupConfigure(models.Model):
                     if rec.auto_remove:
                         files = ftp_server.nlst()
                         for file in files:
-                            create_time = fields.datetime.strptime(
+                            create_time = datetime.strptime(
                                 ftp_server.sendcmd('MDTM ' + file)[4:],
                                 "%Y%m%d%H%M%S")
                             diff_days = (
-                                    fields.datetime.now() - create_time).days
+                                    datetime.now() - create_time).days
                             if diff_days >= rec.days_to_remove:
                                 ftp_server.delete(file)
                     ftp_server.quit()
@@ -716,8 +682,8 @@ class DbBackupConfigure(models.Model):
                     if rec.auto_remove:
                         files = sftp.listdir()
                         expired = list(filter(
-                            lambda fl: (fields.datetime.now()
-                                        - fields.datetime.fromtimestamp(
+                            lambda fl: (fields.Datetime.now()
+                                        - datetime.fromtimestamp(
                                         sftp.stat(fl).st_mtime)).days >=
                                        rec.days_to_remove, files))
                         for file in expired:
@@ -736,92 +702,66 @@ class DbBackupConfigure(models.Model):
             # Google Drive backup
             elif rec.backup_destination == 'google_drive':
                 try:
-                    _logger.info('Google Drive: starting backup for %s', rec.db_name)
-                    if rec.gdrive_token_validity and rec.gdrive_token_validity <= fields.Datetime.now():
-                        _logger.info('Google Drive: token expired, refreshing...')
+                    if rec.gdrive_token_validity <= fields.Datetime.now():
                         rec.generate_gdrive_refresh_token()
                     temp = tempfile.NamedTemporaryFile(
-                        suffix='.%s' % rec.backup_format, delete=False)
-                    temp.close()
+                        suffix='.%s' % rec.backup_format)
                     with open(temp.name, "wb+") as tmp:
                         self.dump_data(rec.db_name, tmp,
                                                 rec.backup_format, rec.backup_frequency)
-                    file_size = os.path.getsize(temp.name)
-                    _logger.info('Google Drive: dump done, file size=%d bytes, uploading...', file_size)
                     try:
-                        auth_headers = {
+                        headers = {
                             "Authorization": "Bearer %s" % rec.gdrive_access_token}
                         para = {
                             "name": backup_filename,
                             "parents": [rec.google_drive_folder_key],
                         }
-                        # Use resumable upload to support large files (>5MB)
-                        init_headers = {
-                            "Authorization": "Bearer %s" % rec.gdrive_access_token,
-                            "Content-Type": "application/json; charset=UTF-8",
-                            "X-Upload-Content-Type": "application/octet-stream",
-                            "X-Upload-Content-Length": str(file_size),
+                        files = {
+                            'data': ('metadata', json.dumps(para),
+                                     'application/json; charset=UTF-8'),
+                            'file': open(temp.name, "rb")
                         }
-                        init_resp = requests.post(
-                            "https://www.googleapis.com/upload/drive/v3/files?uploadType=resumable",
-                            headers=init_headers,
-                            data=json.dumps(para),
+                        requests.post(
+                            "https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart",
+                            headers=headers,
+                            files=files
                         )
-                        _logger.info('Google Drive: init upload response status=%s', init_resp.status_code)
-                        init_resp.raise_for_status()
-                        upload_url = init_resp.headers.get("Location")
-                        if not upload_url:
-                            raise ValueError("Google Drive: no upload URL returned")
-                        # Upload file in chunks of 10MB
-                        chunk_size = 10 * 1024 * 1024
-                        uploaded = 0
-                        with open(temp.name, "rb") as f:
-                            while uploaded < file_size:
-                                chunk = f.read(chunk_size)
-                                end = uploaded + len(chunk) - 1
-                                chunk_headers = {
-                                    "Content-Length": str(len(chunk)),
-                                    "Content-Range": "bytes %d-%d/%d" % (uploaded, end, file_size),
-                                }
-                                resp = requests.put(upload_url, headers=chunk_headers, data=chunk)
-                                _logger.info('Google Drive: uploaded %d/%d bytes, status=%s', end + 1, file_size, resp.status_code)
-                                uploaded += len(chunk)
-                        _logger.info('Google Drive: upload complete for %s', backup_filename)
                         if rec.auto_remove:
                             query = "parents = '%s'" % rec.google_drive_folder_key
                             files_req = requests.get(
                                 "https://www.googleapis.com/drive/v3/files?q=%s" % query,
-                                headers=auth_headers)
-                            for file in files_req.json().get('files', []):
+                                headers=headers)
+                            for file in files_req.json()['files']:
                                 file_date_req = requests.get(
                                     "https://www.googleapis.com/drive/v3/files/%s?fields=createdTime" %
-                                    file['id'], headers=auth_headers)
+                                    file['id'], headers=headers)
                                 create_time = file_date_req.json()[
                                                   'createdTime'][
                                               :19].replace('T', ' ')
                                 diff_days = (
-                                        fields.datetime.now() - fields.datetime.strptime(
+                                        fields.Datetime.now() - datetime.strptime(
                                     create_time, '%Y-%m-%d %H:%M:%S')).days
                                 if diff_days >= rec.days_to_remove:
                                     requests.delete(
                                         "https://www.googleapis.com/drive/v3/files/%s" %
-                                        file['id'], headers=auth_headers)
+                                        file['id'], headers=headers)
                         if rec.notify_user:
                             mail_template_success.send_mail(rec.id,
                                                             force_send=True)
                     except Exception as e:
-                        rec.generated_exception = str(e)
-                        _logger.error('Google Drive upload exception: %s', e, exc_info=True)
+
+                        rec.generated_exception = e
+                        _logger.info('Google Drive Exception: %s', e)
                         if rec.notify_user:
                             mail_template_failed.send_mail(rec.id,
                                                            force_send=True)
-                    finally:
-                        if os.path.exists(temp.name):
-                            os.unlink(temp.name)
-                except Exception as e:
-                    _logger.error('Google Drive backup failed: %s', e, exc_info=True)
+                except Exception:
                     if rec.notify_user:
                         mail_template_failed.send_mail(rec.id, force_send=True)
+                        raise ValidationError(
+                            'Please check the credentials before activation')
+                    else:
+                        raise ValidationError('Please check connection')
             # Dropbox backup
             elif rec.backup_destination == 'dropbox':
                 temp = tempfile.NamedTemporaryFile(
@@ -841,7 +781,7 @@ class DbBackupConfigure(models.Model):
                         files = dbx.files_list_folder(rec.dropbox_folder)
                         file_entries = files.entries
                         expired_files = list(filter(
-                            lambda fl: (fields.datetime.now() -
+                            lambda fl: (fields.Datetime.now() -
                                         fl.client_modified).days >=
                                        rec.days_to_remove,
                             file_entries))
@@ -891,7 +831,6 @@ class DbBackupConfigure(models.Model):
                             upload_response = requests.put(upload_url, headers=headers_upload, data=f)
                             upload_response.raise_for_status()
 
-
                         if rec.auto_remove:
                             verify_url = (
                                 f"{MICROSOFT_GRAPH_END_POINT}/v1.0/me/drive/items/"
@@ -908,14 +847,14 @@ class DbBackupConfigure(models.Model):
                                 response.raise_for_status()
 
                                 files = response.json().get('value', [])
-                                current_time = fields.datetime.now()
+                                current_time = fields.Datetime.now()
 
                                 for file in files:
                                     if file['name'] == backup_filename:
                                         continue
 
                                     create_time_str = file['createdDateTime'][:19].replace('T', ' ')
-                                    create_time = fields.datetime.strptime(create_time_str, '%Y-%m-%d %H:%M:%S')
+                                    create_time = datetime.strptime(create_time_str, '%Y-%m-%d %H:%M:%S')
                                     diff_days = (current_time - create_time).days
 
                                     if diff_days >= rec.days_to_remove:
@@ -963,7 +902,7 @@ class DbBackupConfigure(models.Model):
                                     backup_file_name = item.path.split("/")[-1]
                                     backup_date_str = \
                                         backup_file_name.split("_")[1]
-                                    backup_date = fields.datetime.strptime(
+                                    backup_date = datetime.strptime(
                                         backup_date_str, '%Y-%m-%d').date()
                                     if (fields.date.today() - backup_date).days \
                                             >= rec.days_to_remove:
@@ -1093,12 +1032,11 @@ class DbBackupConfigure(models.Model):
     def dump_data(self, db_name, stream, backup_format, backup_frequency):
         """Dump database `db` into file-like object `stream` if stream is None
         return a file object with the dump. """
-        if not self.env.user.has_group('base.group_system'):
-            cron_user_id = self.env.ref(f'auto_database_backup.ir_cron_auto_db_backup_{backup_frequency}').user_id.id
-            if cron_user_id != self.env.user.id:
-                _logger.error(
-                    'Unauthorized database operation. Backups should only be available from the cron job.')
-                raise ValidationError("Unauthorized database operation. Backups should only be available from the cron job.")
+        cron_user_id = self.env.ref(f'auto_database_backup.ir_cron_auto_db_backup_{backup_frequency}').user_id.id
+        if cron_user_id != self.env.user.id:
+            _logger.error(
+                'Unauthorized database operation. Backups should only be available from the cron job.')
+            raise ValidationError("Unauthorized database operation. Backups should only be available from the cron job.")
         _logger.info('DUMP DB: %s format %s', db_name, backup_format)
         cmd = [find_pg_tool('pg_dump'), '--no-owner', db_name]
         env = exec_pg_environ()
